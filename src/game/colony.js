@@ -29,7 +29,15 @@ import { Indicators, BADGE } from '../agents/indicators.js'
 import { MAX_AGENT_CAP } from '../core/settings.js'
 import { Particles } from '../agents/particles.js'
 import { Navigation } from '../agents/navigation.js'
-import { liveThreadsForColony } from './hidden-projects.js'
+import {
+  liveThreadsForColony,
+  statusFor,
+  STALE_MS,
+  DEFAULT_DORMANT_HOURS,
+  staleMsFromHours,
+} from './hidden-projects.js'
+
+export { statusFor, STALE_MS, DEFAULT_DORMANT_HOURS, staleMsFromHours }
 
 /**
  * The colony: everything that turns a list of agent threads into a place.
@@ -50,7 +58,6 @@ import { liveThreadsForColony } from './hidden-projects.js'
  * you have running.
  */
 
-const STALE_MS = 3 * 24 * 60 * 60 * 1000
 /** How wide an astronaut is, for the purpose of not fitting through gaps it should not. */
 const AGENT_RADIUS = 0.26
 /**
@@ -75,16 +82,6 @@ export const STATUS_LABEL = {
   sleeping: 'Dormant',
   spawning: 'Arriving',
   leaving: 'Heading home',
-}
-
-/** Thread → behaviour. First match wins, exactly like the board's auto-sort. */
-export function statusFor(thread, now = Date.now()) {
-  if (thread.hasError) return 'blocked'
-  if (thread.running) return 'working'
-  if (thread.prState === 'MERGED') return 'celebrating'
-  if (thread.unread) return 'waiting'
-  if (now - thread.lastActivityAt > STALE_MS) return 'sleeping'
-  return 'idle'
 }
 
 /**
@@ -476,6 +473,7 @@ export class Colony {
    */
   setThreads(threads, archivedIds = new Set(), hiddenProjects = new Set(), knownIds = new Set()) {
     const now = Date.now()
+    const staleMs = staleMsFromHours(this.settings.get('dormantHours'))
     const live = liveThreadsForColony(threads, archivedIds, hiddenProjects)
 
     // Group by repo, biggest project first so the busiest work lands nearest the middle.
@@ -500,7 +498,7 @@ export class Colony {
     const dormant = new Set()
     if (this.settings.get('hideDormant')) {
       for (const [name, list] of byProject) {
-        if (list.every((t) => statusFor(t, now) === 'sleeping')) dormant.add(name)
+        if (list.every((t) => statusFor(t, now, staleMs) === 'sleeping')) dormant.add(name)
       }
       // Never fold away everything: a colony that answers a poll with an empty planet reads as
       // broken rather than tidy, and there is nothing on screen to tell you which it was.
@@ -508,6 +506,33 @@ export class Colony {
       for (const name of dormant) byProject.delete(name)
     }
     this.dormantProjects = dormant
+
+    // Individual dormant job filtering inside active repos (when hideDormantJobs is enabled).
+    const hideDormantJobs = Boolean(this.settings.get('hideDormantJobs'))
+    const dormantThreadIds = new Set()
+    const dormantJobsByProject = new Map()
+    let onMapDormantCount = 0
+
+    for (const [name, list] of [...byProject.entries()]) {
+      const sleeping = list.filter((t) => statusFor(t, now, staleMs) === 'sleeping')
+      if (!sleeping.length) continue
+      onMapDormantCount += sleeping.length
+      if (!hideDormantJobs) continue
+      const awake = list.filter((t) => statusFor(t, now, staleMs) !== 'sleeping')
+      if (awake.length > 0) {
+        byProject.set(name, awake)
+        dormantJobsByProject.set(name, sleeping.length)
+        for (const t of sleeping) dormantThreadIds.add(t.id)
+      } else if (byProject.size > 1) {
+        byProject.delete(name)
+        dormant.add(name)
+        dormantJobsByProject.set(name, sleeping.length)
+        for (const t of sleeping) dormantThreadIds.add(t.id)
+      }
+    }
+    this.dormantThreadIds = dormantThreadIds
+    this.dormantJobsByProject = dormantJobsByProject
+    this.onMapDormantCount = onMapDormantCount
 
     const projects = [...byProject.entries()].sort((a, b) => {
       if (b[1].length !== a[1].length) return b[1].length - a[1].length
@@ -548,7 +573,9 @@ export class Colony {
       // astronaut walked, for a thread that had left.
       list.sort((a, b) => a.createdAt - b.createdAt)
       const slotOf = plot.slotOf || (plot.slotOf = new Map())
-      for (const id of [...slotOf.keys()]) if (!list.some((t) => t.id === id)) slotOf.delete(id)
+      for (const id of [...slotOf.keys()]) {
+        if (!list.some((t) => t.id === id) && !dormantThreadIds.has(id)) slotOf.delete(id)
+      }
       const taken = new Set(slotOf.values())
       for (const thread of list) {
         if (slotOf.has(thread.id)) continue
@@ -560,7 +587,7 @@ export class Colony {
 
       list.forEach((thread) => {
         const i = slotOf.get(thread.id)
-        const status = statusFor(thread, now)
+        const status = statusFor(thread, now, staleMs)
         if (stats[status] !== undefined) stats[status]++
         if (status === 'waiting' || status === 'blocked') urgent.add(plot.id)
         if (status === 'waiting' || status === 'blocked' || status === 'working') active.add(plot.id)
@@ -589,7 +616,9 @@ export class Colony {
       if (!seenBuildings.has(id)) this._removeBuilding(id, entry)
     }
 
-    this.threads = new Map(live.map((t) => [t.id, t]))
+    this.threads = new Map(
+      live.filter((t) => !dormantThreadIds.has(t.id)).map((t) => [t.id, t])
+    )
     this.urgentPlots = urgent
     this.activePlots = active
     this._rebuildNavigation()

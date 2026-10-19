@@ -2,6 +2,11 @@ import { PRESETS, PLANETS_ORDER } from './hud-data.js'
 import { PLANETS } from '../world/planet.js'
 import { TIMES, systemTimeOfDay } from '../world/sky.js'
 import { STATUS_LABEL } from '../game/colony.js'
+import {
+  DORMANT_PRESETS,
+  DEFAULT_DORMANT_HOURS,
+  formatDormantWindow,
+} from '../game/hidden-projects.js'
 import { FACE, FRAME_COLS, FRAME_ROWS } from '../agents/faces.js'
 import { PLOT_PALETTE, hashString } from '../world/plots.js'
 
@@ -258,11 +263,54 @@ export class Hud {
         )
       )
     }
+    const dormantJobsRow = this._row(
+      'Hide dormant jobs',
+      'Hides individual sleeping jobs inside active repos. Opens a preview showing how many jobs would be hidden.'
+    )
+    const dormantJobsWrap = document.createElement('div')
+    dormantJobsWrap.style.cssText = 'display:flex;align-items:center;gap:6px'
+    const dormantConfigBtn = document.createElement('button')
+    dormantConfigBtn.type = 'button'
+    dormantConfigBtn.className = 'btn ghost show-repo'
+    dormantConfigBtn.textContent = 'Preview…'
+    dormantConfigBtn.addEventListener('click', () => this.openDormantDialog())
+    const dormantToggle = document.createElement('button')
+    dormantToggle.type = 'button'
+    dormantToggle.className = 'toggle'
+    dormantToggle.setAttribute('role', 'switch')
+    dormantToggle.setAttribute('aria-label', 'Hide dormant jobs')
+    dormantToggle.addEventListener('click', () => {
+      if (this.settings.get('hideDormantJobs')) {
+        this.settings.set('hideDormantJobs', false)
+      } else {
+        this.openDormantDialog()
+      }
+    })
+    dormantJobsWrap.append(dormantConfigBtn, dormantToggle)
+    dormantJobsRow.appendChild(dormantJobsWrap)
+    this.controls.push({
+      el: dormantJobsRow,
+      sync: () => {
+        dormantToggle.setAttribute('aria-checked', String(Boolean(this.settings.get('hideDormantJobs'))))
+        dormantJobsRow.classList.toggle('overridden', this.settings.isOverridden('hideDormantJobs'))
+      },
+    })
+
     view.append(
       this._toggle(
         'Hide dormant repos',
         'hideDormant',
-        'Takes a repo off the map when every thread in it has been quiet for three days. Its threads are untouched, and it comes back to the same ground the moment one wakes up.'
+        'Takes a repo off the map when every thread in it has been quiet past the dormancy window. Its threads are untouched, and it comes back to the same ground the moment one wakes up.'
+      ),
+      dormantJobsRow,
+      this._slider(
+        'Dormant after',
+        'dormantHours',
+        1,
+        720,
+        1,
+        (v) => formatDormantWindow(v),
+        'How long a finished, non-errored, viewed thread can sit with no activity before it is considered dormant.'
       )
     )
     view.append(
@@ -463,6 +511,7 @@ export class Hud {
     on('#btn-copy-path', 'click', () => this.actions.copyProjectPath?.())
     on('#btn-hide-project', 'click', () => this.actions.hideProject?.())
     on('#btn-hidden-toggle', 'click', () => this.toggleHiddenList())
+    on('#btn-dormant-jobs', 'click', () => this.openDormantDialog())
     on('#btn-locate', 'click', () => this.actions.focusProject?.(this.project?.name))
     on('#btn-close-project', 'click', () => this.actions.closeProject?.())
     on('.help', 'click', (e) => {
@@ -471,7 +520,147 @@ export class Hud {
     this.$('.help .sheet').addEventListener('click', (e) => e.stopPropagation())
     on('#btn-help-close', 'click', () => this.toggleHelp(false))
 
+    this._wireDormantDialog()
     this.settings.onChange(() => this.syncSettings())
+  }
+
+  _wireDormantDialog() {
+    const dialog = this.$('.dormant-dialog')
+    if (!dialog) return
+
+    const presetsWrap = dialog.querySelector('.dormant-presets')
+    this._dormantPresetBtns = []
+    for (const preset of DORMANT_PRESETS) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'chip'
+      b.textContent = preset.short
+      b.title = `Dormant after ${preset.label} of inactivity`
+      b.addEventListener('click', () => {
+        this._pendingDormantHours = preset.hours
+        this._refreshDormantDialog()
+      })
+      presetsWrap.appendChild(b)
+      this._dormantPresetBtns.push([preset.hours, b])
+    }
+
+    const slider = dialog.querySelector('#dormant-hours-slider')
+    slider.addEventListener('input', () => {
+      this._pendingDormantHours = Number(slider.value)
+      this._refreshDormantDialog()
+    })
+
+    dialog.querySelector('#btn-dormant-close').addEventListener('click', () => this.closeDormantDialog())
+    dialog.querySelector('#btn-dormant-cancel').addEventListener('click', () => this.closeDormantDialog())
+    dialog.querySelector('#btn-dormant-show-all').addEventListener('click', () => {
+      this.settings.set('hideDormantJobs', false)
+      this.closeDormantDialog()
+      this.toast('Showing all dormant jobs on the map')
+    })
+    dialog.querySelector('#btn-dormant-confirm').addEventListener('click', () => {
+      const hours = this._pendingDormantHours ?? Number(this.settings.get('dormantHours')) ?? DEFAULT_DORMANT_HOURS
+      const preview = this.actions.previewDormant?.(hours) || { wouldHideCount: 0 }
+      this.settings.set('dormantHours', hours)
+      this.settings.set('hideDormantJobs', true)
+      this.closeDormantDialog()
+      const n = preview.wouldHideCount
+      this.toast(
+        n > 0
+          ? `Hid ${n} dormant job${n === 1 ? '' : 's'} (inactive > ${formatDormantWindow(hours)})`
+          : `Hiding dormant jobs inactive > ${formatDormantWindow(hours)} (0 right now)`
+      )
+    })
+
+    // Fallback for browsers without declarative closedBy support on <dialog>.
+    if (!('closedBy' in HTMLDialogElement.prototype)) {
+      dialog.addEventListener('click', (event) => {
+        const rect = dialog.getBoundingClientRect()
+        const isInDialog =
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width
+        if (!isInDialog) dialog.close()
+      })
+    }
+  }
+
+  openDormantDialog() {
+    const dialog = this.$('.dormant-dialog')
+    if (!dialog) return
+    this._pendingDormantHours = Number(this.settings.get('dormantHours')) || DEFAULT_DORMANT_HOURS
+    this._refreshDormantDialog()
+    if (!dialog.open) dialog.showModal()
+  }
+
+  closeDormantDialog() {
+    const dialog = this.$('.dormant-dialog')
+    if (dialog?.open) dialog.close()
+  }
+
+  _refreshDormantDialog() {
+    const dialog = this.$('.dormant-dialog')
+    if (!dialog) return
+    const hours = this._pendingDormantHours ?? (Number(this.settings.get('dormantHours')) || DEFAULT_DORMANT_HOURS)
+    const slider = dialog.querySelector('#dormant-hours-slider')
+    if (document.activeElement !== slider) slider.value = String(hours)
+    dialog.querySelector('.dormant-window-value').textContent = formatDormantWindow(hours)
+
+    for (const [h, btn] of this._dormantPresetBtns || []) {
+      btn.setAttribute('aria-pressed', String(h === hours))
+    }
+
+    const preview = this.actions.previewDormant?.(hours) || {
+      wouldHideCount: 0,
+      remainingVisibleCount: 0,
+      affectedProjects: [],
+      foldedRepoCount: 0,
+      foldedThreadCount: 0,
+    }
+
+    const countEl = dialog.querySelector('.dormant-impact-count')
+    const subEl = dialog.querySelector('.dormant-impact-sub')
+    const listEl = dialog.querySelector('.dormant-breakdown')
+    const confirmBtn = dialog.querySelector('#btn-dormant-confirm')
+    const showAllBtn = dialog.querySelector('#btn-dormant-show-all')
+
+    const n = preview.wouldHideCount
+    countEl.textContent =
+      n === 0
+        ? `0 jobs on the map would be hidden`
+        : `${n} dormant job${n === 1 ? '' : 's'} would be hidden`
+    countEl.dataset.zero = String(n === 0)
+
+    const stay = preview.remainingVisibleCount
+    let subText = `${stay} active or recent job${stay === 1 ? '' : 's'} will stay on the map.`
+    if (preview.foldedRepoCount > 0) {
+      subText += ` (${preview.foldedRepoCount} entirely quiet repo${preview.foldedRepoCount === 1 ? ' is' : 's are'} already folded away.)`
+    }
+    subEl.textContent = subText
+
+    listEl.innerHTML = ''
+    if (preview.affectedProjects.length > 0) {
+      for (const item of preview.affectedProjects) {
+        const row = document.createElement('div')
+        row.className = 'dormant-breakdown-row'
+        row.innerHTML =
+          `<span class="repo-name">${escapeHtml(item.name)}</span>` +
+          `<span class="repo-counts"><b>${item.dormantCount}</b> of ${item.totalCount} dormant</span>`
+        listEl.appendChild(row)
+      }
+      listEl.hidden = false
+    } else {
+      listEl.hidden = true
+    }
+
+    const alreadyActive = Boolean(this.settings.get('hideDormantJobs'))
+    showAllBtn.hidden = !alreadyActive
+    confirmBtn.textContent =
+      n > 0
+        ? `Hide ${n} dormant job${n === 1 ? '' : 's'}`
+        : alreadyActive
+          ? 'Update threshold (0 hidden)'
+          : 'Enable filter (0 hidden)'
   }
 
   // ── state in ────────────────────────────────────────────────────────────────────────
@@ -505,12 +694,17 @@ export class Hud {
    * it is a list now because the sidebar is where all the chrome lives, and because a list
    * can carry a count and an alarm without running out of room at eleven repos.
    */
-  setLegend(projects, activeName = null, hidden = [], folded = []) {
+  setLegend(projects, activeName = null, hidden = [], folded = [], dormantMeta = {}) {
+    const dActive = Boolean(dormantMeta.active)
+    const dHidden = dormantMeta.hiddenCount ?? 0
+    const dOnMap = dormantMeta.onMapDormantCount ?? 0
+    const dHours = dormantMeta.dormantHours ?? DEFAULT_DORMANT_HOURS
+
     const signature =
       projects.map((p) => `${p.name}:${p.count}:${p.accent}:${p.urgent ? 1 : 0}`).join('|') +
       `~${activeName}~` +
       hidden.map((p) => `${p.name}:${p.count}`).join('|') +
-      `~${folded.length}`
+      `~${folded.length}~${dActive ? 1 : 0}:${dHidden}:${dOnMap}:${dHours}`
     if (this._last.legend === signature) return
     this._last.legend = signature
 
@@ -532,10 +726,23 @@ export class Hud {
     }
     this.$('.sec-head span').textContent = `${projects.length} repo${projects.length === 1 ? '' : 's'}`
 
+    const dormantBtn = this.$('#btn-dormant-jobs')
+    if (dormantBtn) {
+      dormantBtn.setAttribute('aria-pressed', String(dActive))
+      if (dActive) {
+        dormantBtn.textContent = dHidden > 0 ? `${dHidden} dormant hidden` : `Dormant > ${formatDormantWindow(dHours)}`
+        dormantBtn.title = `Hiding jobs inactive for more than ${formatDormantWindow(dHours)} — click to configure or show all`
+      } else {
+        dormantBtn.textContent = dOnMap > 0 ? `Hide dormant (${dOnMap})` : 'Hide dormant…'
+        dormantBtn.title = 'Preview and hide dormant jobs across active repos'
+      }
+    }
+
     // The hidden list is its own block at the foot of the sidebar: collapsed by default, because
     // the whole point of hiding a repo is not to look at it.
     const block = this.$('.hidden-block')
-    block.hidden = hidden.length === 0 && folded.length === 0
+    const hasDormantJobsRow = dActive && dHidden > 0
+    block.hidden = hidden.length === 0 && folded.length === 0 && !hasDormantJobsRow
     const hiddenWrap = this.$('.hidden-projects')
     hiddenWrap.innerHTML = ''
     for (const p of hidden) {
@@ -575,7 +782,27 @@ export class Hud {
       hiddenWrap.appendChild(row)
     }
 
-    const total = hidden.length + folded.length
+    if (hasDormantJobsRow) {
+      const row = document.createElement('div')
+      row.className = 'repo hidden-repo folded-note'
+      row.innerHTML = `<span class="n">${dHidden} dormant job${dHidden === 1 ? '' : 's'} (&gt; ${escapeHtml(formatDormantWindow(dHours))})</span>`
+      const cfg = document.createElement('button')
+      cfg.type = 'button'
+      cfg.className = 'btn ghost show-repo'
+      cfg.title = 'Configure dormancy window'
+      cfg.textContent = 'Window'
+      cfg.addEventListener('click', () => this.openDormantDialog())
+      const show = document.createElement('button')
+      show.type = 'button'
+      show.className = 'btn ghost show-repo'
+      show.title = 'Put dormant jobs back on the map'
+      show.textContent = 'Show'
+      show.addEventListener('click', () => this.settings.set('hideDormantJobs', false))
+      row.append(cfg, show)
+      hiddenWrap.appendChild(row)
+    }
+
+    const total = hidden.length + folded.length + (hasDormantJobsRow ? dHidden : 0)
     this.$('#btn-hidden-toggle .label').textContent = `${total} off the map`
     this._syncHiddenList()
   }
@@ -618,7 +845,7 @@ export class Hud {
     // nothing is happening keeps whatever "4m ago" it was first drawn with, for as long as
     // you leave the panel open.
     const signature =
-      `${project.name}~${project.path}~${project.accent}~${project.selectedId}~${Math.floor(Date.now() / 60000)}~` +
+      `${project.name}~${project.path}~${project.accent}~${project.selectedId}~${project.dormantHidden || 0}~${Math.floor(Date.now() / 60000)}~` +
       project.threads.map((t) => `${t.id}:${t.status}:${t.title}:${t.lastActivityAt}`).join('|')
     panel.classList.add('drilled')
     if (this._last.project === signature) return
@@ -638,8 +865,13 @@ export class Hud {
 
     const n = project.threads.length
     const waiting = project.threads.filter((t) => t.status === 'waiting' || t.status === 'blocked').length
-    this.$('.side .threads-head').innerHTML =
-      `<span>${n} thread${n === 1 ? '' : 's'}</span>` + (waiting ? `<span class="want">${waiting} need you</span>` : '')
+    const dormantHidden = project.dormantHidden || 0
+    const head = this.$('.side .threads-head')
+    head.innerHTML =
+      `<span>${n} thread${n === 1 ? '' : 's'}</span>` +
+      (waiting ? `<span class="want">${waiting} need you</span>` : '') +
+      (dormantHidden ? `<button type="button" class="btn ghost show-repo dormant-inline-btn" title="Configure or show hidden dormant jobs">${dormantHidden} dormant hidden</button>` : '')
+    head.querySelector('.dormant-inline-btn')?.addEventListener('click', () => this.openDormantDialog())
 
     const list = this.$('.side .threads')
     // A poll rewrites these rows every time a live thread's timestamp moves. Losing your
@@ -1077,7 +1309,10 @@ const TEMPLATE = `
 
   <div class="side-body">
     <div class="projects-pane">
-      <div class="sec-head"><span>Repos</span></div>
+      <div class="sec-head">
+        <span>Repos</span>
+        <button type="button" class="btn ghost dormant-trigger" id="btn-dormant-jobs" aria-pressed="false" title="Preview and hide dormant jobs across active repos">Hide dormant…</button>
+      </div>
       <div class="projects"></div>
       <div class="hidden-block" hidden>
         <button type="button" class="hidden-toggle" id="btn-hidden-toggle" aria-expanded="false">
@@ -1149,6 +1384,44 @@ const TEMPLATE = `
 <div class="toasts"></div>
 <div class="fps panel"></div>
 <div class="hint-pill panel"></div>
+
+<dialog class="dormant-dialog panel" closedby="any" aria-labelledby="dormant-dialog-title">
+  <header class="dormant-dialog-head">
+    <h2 id="dormant-dialog-title">Hide dormant jobs</h2>
+    <button type="button" class="btn icon ghost" id="btn-dormant-close" title="Close (Esc)">${ICON.close}</button>
+  </header>
+  <div class="dormant-dialog-body">
+    <p class="dormant-definition">
+      A job is <b>dormant</b> (<span class="dormant-z">z</span> on the map) when it has had <b>no transcript activity</b> for longer than the dormancy window and is not currently running, blocked on an error, celebrating a merged PR, or waiting unread on you.
+    </p>
+
+    <div class="dormant-control-group">
+      <div class="dormant-control-label">
+        <span>Dormant after inactivity of</span>
+        <b class="dormant-window-value">3 days</b>
+      </div>
+      <div class="chips dormant-presets"></div>
+      <div class="dormant-slider-row">
+        <span class="range-bound">1h</span>
+        <input type="range" class="slider" id="dormant-hours-slider" min="1" max="720" step="1" aria-label="Dormancy threshold in hours" />
+        <span class="range-bound">30d</span>
+      </div>
+    </div>
+
+    <div class="dormant-impact" aria-live="polite">
+      <div class="dormant-impact-count">0 jobs on the map would be hidden</div>
+      <div class="dormant-impact-sub"></div>
+      <div class="dormant-breakdown" hidden></div>
+    </div>
+  </div>
+  <footer class="dormant-dialog-foot">
+    <button type="button" class="btn ghost" id="btn-dormant-show-all" hidden>Show all jobs</button>
+    <div class="dormant-dialog-actions">
+      <button type="button" class="btn" id="btn-dormant-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="btn-dormant-confirm">Hide dormant jobs</button>
+    </div>
+  </footer>
+</dialog>
 
 <div class="help">
   <div class="sheet panel">

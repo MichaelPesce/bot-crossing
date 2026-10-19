@@ -564,23 +564,104 @@ test('an Antigravity transcript yields a thread with prompt and prefixed ID', as
   await fsp.rm(home, { recursive: true, force: true })
 })
 
-test('an open Antigravity turn is reported as running', async () => {
+test('an open Antigravity turn is reported as running even when intermediate steps carry status DONE', async () => {
   const home = await fakeAntigravity([
-    { type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'implement feature', created_at: new Date().toISOString() },
+    {
+      type: 'USER_INPUT',
+      source: 'USER_EXPLICIT',
+      status: 'DONE',
+      content: '<USER_REQUEST>implement feature</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` fromUnspecified to Gemini 4 Argon (High).\n</USER_SETTINGS_CHANGE>',
+      created_at: new Date().toISOString(),
+    },
+    {
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      tool_calls: [{ name: 'run_command', args: { Cwd: '"/tmp/demo"', CommandLine: '"npm test"' } }],
+    },
+    {
+      type: 'GENERIC',
+      status: 'DONE',
+      content: 'The command exited with code 0.',
+    },
   ])
   const h = await antigravityWith(home)
   const [t] = await h.scanThreads()
-  assert.equal(t.running, true)
+  assert.equal(t.running, true, 'tool result step leaves the turn open until a final PLANNER_RESPONSE arrives')
+  assert.equal(t.cwd, '/tmp/demo')
+  assert.equal(t.project, 'demo')
+  assert.equal(t.model, 'Gemini 4 Argon')
+  assert.equal(t.effort, 'high')
   await fsp.rm(home, { recursive: true, force: true })
 })
 
-test('Antigravity opens through antigravity:// scheme and handles invalid refs', async () => {
+test('an Antigravity turn calling ask_question stops running and raises unread', async () => {
+  const home = await fakeAntigravity([
+    { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '<USER_REQUEST>clarify</USER_REQUEST>' },
+    {
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      tool_calls: [{ name: 'ask_question', args: { questions: '[]' } }],
+    },
+  ])
+  const h = await antigravityWith(home)
+  const [t] = await h.scanThreads()
+  assert.equal(t.running, false)
+  assert.equal(t.unread, true)
+  await fsp.rm(home, { recursive: true, force: true })
+})
+
+test('Antigravity subagents invoked via invoke_subagent attach to their parent and do not stand alone', async () => {
+  const subId = '99999999-8888-4777-a666-555555555555'
+  const home = await fakeAntigravity([
+    { type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '<USER_REQUEST>parent task</USER_REQUEST>' },
+    {
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      tool_calls: [
+        {
+          name: 'invoke_subagent',
+          args: { Subagents: JSON.stringify([{ TypeName: 'research', Role: 'Code Researcher', Prompt: 'audit auth flow' }]) },
+        },
+      ],
+    },
+    {
+      type: 'GENERIC',
+      status: 'DONE',
+      content: `Subagent launched with conversationId: ${subId}`,
+    },
+  ])
+  const subDir = path.join(home, 'brain', subId, '.system_generated', 'logs')
+  await fsp.mkdir(subDir, { recursive: true })
+  await fsp.writeFile(
+    path.join(subDir, 'transcript.jsonl'),
+    [
+      JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE', content: '<USER_REQUEST>audit auth flow</USER_REQUEST>' }),
+      JSON.stringify({ type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ name: 'view_file', args: { AbsolutePath: '"/tmp/demo/auth.js"' } }] }),
+    ].join('\n') + '\n'
+  )
+  const h = await antigravityWith(home)
+  const threads = await h.scanThreads()
+  assert.equal(threads.length, 1, 'subagent does not appear as a separate top-level thread')
+  assert.equal(threads[0].id, `antigravity:${SESSION_ID}`)
+  assert.equal(threads[0].project, 'demo', 'parent inherits cwd discovered by its subagent when parent has none yet')
+  assert.equal(threads[0].subagents?.length, 1)
+  assert.equal(threads[0].subagents[0].id, subId)
+  assert.equal(threads[0].subagents[0].task, 'audit auth flow')
+  await fsp.rm(home, { recursive: true, force: true })
+})
+
+test('Antigravity opens through antigravity:// scheme, finds agy CLI, and handles invalid refs', posixOnly, async () => {
   const home = await fakeAntigravity([])
   const h = await antigravityWith(home)
-  const opened = await h.openThread({ sessionId: SESSION_ID })
-  assert.equal(opened.ok, true)
-  assert.equal(schemeOf(opened.url), 'antigravity')
-  assert.equal(opened.url, `antigravity://resume?session=${SESSION_ID}`)
+  await withFakeCli('agy', async (bin) => {
+    const opened = await h.openThread({ sessionId: SESSION_ID, cwd: '/tmp/demo' })
+    assert.equal(opened.ok, true)
+    assert.equal(schemeOf(opened.url), 'antigravity')
+    assert.equal(opened.url, `antigravity://resume?session=${SESSION_ID}`)
+    assert.deepEqual(opened.command, { argv: [bin, '--resume', SESSION_ID], cwd: '/tmp/demo' })
+    const fresh = await h.newSession('/tmp/demo')
+    assert.deepEqual(fresh.command, { argv: [bin], cwd: '/tmp/demo' })
+  })
   assert.equal((await h.openThread({})).ok, false)
   assert.equal((await h.newSession('relative/path')).ok, false)
   await fsp.rm(home, { recursive: true, force: true })

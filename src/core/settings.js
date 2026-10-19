@@ -155,6 +155,16 @@ const DEFAULTS = {
    * one click and a folded repo returns to the same ground the moment a thread wakes up.
    */
   hideDormant: true,
+  /**
+   * Hide individual dormant jobs even inside repos that still have active or idle threads.
+   * Configured via the Hide Dormant Jobs dialog with a live preview of how many jobs would be hidden.
+   */
+  hideDormantJobs: false,
+  /**
+   * Hours of inactivity before a non-running, non-errored, non-merged, viewed thread is
+   * considered dormant ("sleeping"). Default is 72 hours (3 days).
+   */
+  dormantHours: 72,
   timeOfDay: 0.32, // 0..1 — 0 is midnight, 0.5 is noon
   autoTime: false,
   /** Sky follows this machine's own clock. Wins over `autoTime`; both off is manual. */

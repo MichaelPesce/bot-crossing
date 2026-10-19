@@ -23,7 +23,13 @@ import {
   newSession,
   revealFolder,
 } from './game/api.js'
-import { hideProject, hiddenCatalog, unhideProject } from './game/hidden-projects.js'
+import {
+  hideProject,
+  hiddenCatalog,
+  previewDormantJobs,
+  staleMsFromHours,
+  unhideProject,
+} from './game/hidden-projects.js'
 import { withErrands } from './game/errands.js'
 
 /**
@@ -294,6 +300,14 @@ const actions = {
     const thread = threads.find((t) => t.id === id)
     return thread ? transcriptProgress(thread) : 0
   },
+
+  previewDormant: (hours) =>
+    previewDormantJobs(threads, {
+      archivedIds: new Set(state.archived),
+      hiddenProjects: new Set(state.hiddenProjects || []),
+      hideDormantRepos: Boolean(settings.get('hideDormant')),
+      dormantHours: hours,
+    }),
 }
 
 /**
@@ -411,14 +425,21 @@ function syncProject() {
   // Folded-away repos are listed alongside the ones you hid by hand. Same principle: nothing
   // leaves the map without somewhere on screen saying where it went.
   const folded = hiddenCatalog([...(colony.dormantProjects || [])], threads)
+  const dormantMeta = {
+    active: Boolean(settings.get('hideDormantJobs')),
+    hiddenCount: colony.dormantThreadIds?.size ?? 0,
+    onMapDormantCount: colony.onMapDormantCount ?? 0,
+    dormantHours: settings.get('dormantHours'),
+  }
   const plot = selectedProject ? colony.plots.get(selectedProject) : null
   if (!plot) {
     selectedProject = null
     hud.setProject(null)
-    hud.setLegend(legendProjects, null, hidden, folded)
+    hud.setLegend(legendProjects, null, hidden, folded, dormantMeta)
     return
   }
   const now = Date.now()
+  const staleMs = staleMsFromHours(settings.get('dormantHours'))
   const list = [...colony.threads.values()]
     .filter((thread) => thread.project === plot.name)
     .map((thread) => ({
@@ -426,7 +447,7 @@ function syncProject() {
       title: thread.title,
       worktree: thread.worktree,
       lastActivityAt: thread.lastActivityAt,
-      status: statusFor(thread, now),
+      status: statusFor(thread, now, staleMs),
     }))
     // Whoever wants something first, then most recently touched — the same order of
     // importance the badges use above their heads.
@@ -441,10 +462,11 @@ function syncProject() {
     path: pathForProject(plot.name),
     threads: list,
     selectedId,
+    dormantHidden: colony.dormantJobsByProject?.get(plot.name) ?? 0,
   })
   // The legend is the same selection seen from the bottom of the screen: keep it in step
   // here rather than only on the next poll.
-  hud.setLegend(legendProjects, selectedProject, hidden, folded)
+  hud.setLegend(legendProjects, selectedProject, hidden, folded, dormantMeta)
 }
 
 // ── pointer ───────────────────────────────────────────────────────────────────────────
@@ -943,7 +965,13 @@ function applyThreads(list) {
     .map((plot) => ({
       name: plot.name,
       accent: plot.accent,
-      count: list.filter((t) => !t.archived && !archivedSet.has(t.id) && t.project === plot.name).length,
+      count: list.filter(
+        (t) =>
+          !t.archived &&
+          !archivedSet.has(t.id) &&
+          !colony.dormantThreadIds?.has(t.id) &&
+          t.project === plot.name
+      ).length,
       urgent: colony.urgentPlots?.has(plot.id) ?? false,
     }))
     .sort((a, b) => b.count - a.count)
@@ -978,10 +1006,11 @@ let seenFirstRoster = false
 let lastChime = 0
 function chimeForNewWaiting(list, archivedSet, hiddenSet) {
   const now = Date.now()
+  const staleMs = staleMsFromHours(settings.get('dormantHours'))
   const waiting = new Set()
   for (const t of list) {
     if (archivedSet.has(t.id) || hiddenSet.has(t.project)) continue
-    if (statusFor(t, now) === 'waiting') waiting.add(t.id)
+    if (statusFor(t, now, staleMs) === 'waiting') waiting.add(t.id)
   }
   if (seenFirstRoster) {
     for (const id of waiting) {
@@ -1089,9 +1118,11 @@ settings.onChange((changed, scope) => {
   if (changed.has('planet')) ambience.setPlanet(colony.planet)
   if (changed.has('showFps')) hud.syncSettings()
   if (changed.has('followSelected')) rig.setFollow(settings.get('followSelected') ? colony.agentFor(selectedId) : null)
-  // Folding dormant repos away changes which threads are on the map, so the colony has to be
-  // rebuilt from the list rather than merely re-rendered.
-  if (changed.has('hideDormant')) applyThreads(threads)
+  // Folding dormant repos or hiding dormant jobs changes which threads are on the map, so the
+  // colony has to be rebuilt from the list rather than merely re-rendered.
+  if (changed.has('hideDormant') || changed.has('hideDormantJobs') || changed.has('dormantHours')) {
+    applyThreads(threads)
+  }
   if (changed.has('maxAgents')) applyThreads(threads)
 })
 
