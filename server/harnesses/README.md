@@ -18,8 +18,8 @@ export default {
   name: 'My Harness',            // what a human sees in the UI
   detect,                        // () => Promise<boolean>
   scanThreads,                   // () => Promise<Thread[]>
-  openThread,                    // (ref) => { ok, url, command? } | { ok: false, error }
-  newSession,                    // (dir) => { ok, url, command? } | { ok: false, error }
+  openThread,                    // (ref) => { ok, url, command?, vscode? } | { ok: false, error }
+  newSession,                    // (dir) => { ok, url, command?, vscode? } | { ok: false, error }
 }
 ```
 
@@ -53,6 +53,12 @@ server has already checked still exists.
 Add `command: { argv, cwd }` — the harness's own CLI resuming the same thread, with an absolute `argv[0]` —
 when the CLI is installed, and the server runs it in a terminal for a machine with no desktop app or a person who asked for one.
 Never spawn it yourself.
+
+Add `vscode: { folder, url?, note? }` when the harness also lives in VS Code, for a person who
+picked *Open threads in: VS Code*. `folder` is the absolute directory the thread ran in, opened
+first so the right window is in front; `url` is a `vscode://<extension-id>/…` link the
+extension answers, sent once it is; `note` is shown instead of the usual toast, for an offer
+that only gets as far as the repo. Leave it out and that setting falls back to `url`.
 
 If your harness has no deep link, return `{ ok: false, error: '…' }` and say why — the UI
 shows the message rather than pretending the click worked.

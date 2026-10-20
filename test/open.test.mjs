@@ -12,7 +12,8 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { present } from '../server/api.mjs'
+import { present, vscodeLinks } from '../server/api.mjs'
+import { openThread as openHarnessThread } from '../server/scan.mjs'
 import { withServer } from './support/with-server.mjs'
 import { withEnv, withPlatform, fakeExecutable } from './support/env.mjs'
 
@@ -97,4 +98,72 @@ test('/api/new-session with via: terminal starts the bare CLI in that folder', p
       assert.deepEqual(await kitty.argv(), [`--directory=${dir}`, claude.file])
     })
   )
+})
+
+// ── VS Code ───────────────────────────────────────────────────────────────────
+
+test('a VS Code offer opens the folder first, then the extension link', async () => {
+  const dir = os.tmpdir()
+  const url = `vscode://anthropic.claude-code/open?session=${UUID}`
+  assert.deepEqual(vscodeLinks({ folder: '/work/my repo', url }), ['vscode://file//work/my%20repo', url])
+  assert.deepEqual(vscodeLinks({ folder: dir }), [`vscode://file/${encodeURI(dir)}`])
+  assert.deepEqual(vscodeLinks({ folder: 'relative', url: 'claude://resume' }), [], 'only absolute folders and vscode:// links')
+  assert.deepEqual(vscodeLinks(undefined), [])
+})
+
+test('the Claude Code and Codex adapters offer VS Code the thread’s own folder', async () => {
+  const dir = os.tmpdir()
+  const claude = await openHarnessThread('claude-code', { cliSessionId: UUID, cwd: dir })
+  assert.deepEqual(claude.vscode, { folder: dir, url: `vscode://anthropic.claude-code/open?session=${UUID}` })
+  const desktopOnly = await openHarnessThread('claude-code', { desktopSessionId: 'local_abc', cwd: dir })
+  assert.equal(desktopOnly.vscode, undefined, 'no transcript, nothing for the extension to resume')
+
+  const codex = await openHarnessThread('codex', { sessionId: UUID, cwd: dir })
+  assert.equal(codex.vscode.folder, dir)
+  assert.equal(codex.vscode.url, undefined)
+})
+
+/** Linux plumbing that answers `vscode:` and keeps every URL it is handed, in order. */
+async function withVsCodeOnLinux(fn) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-vscode-'))
+  try {
+    const log = path.join(dir, 'opened')
+    await fsp.writeFile(path.join(dir, 'xdg-mime'), '#!/bin/sh\necho code-url-handler.desktop\n', { mode: 0o755 })
+    await fsp.writeFile(path.join(dir, 'xdg-open'), `#!/bin/sh\nprintf '%s\\n' "$1" >> '${log}'\n`, { mode: 0o755 })
+    const opened = async () => (await fsp.readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean)
+    return await withEnv({ PATH: dir }, () => withPlatform('linux', () => fn({ dir, opened })))
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('/api/open with via: vscode opens the repo, then the session in the extension', posixOnly, async () => {
+  await withVsCodeOnLinux(({ dir, opened }) =>
+    withServer(async ({ call }) => {
+      const ref = { cliSessionId: UUID, cwd: dir }
+      const res = await post(call, '/api/open', { harness: 'claude-code', ref, via: 'vscode' })
+      assert.equal(res.status, 200)
+      assert.equal((await res.json()).via, 'vscode')
+      await new Promise((r) => setTimeout(r, 1800))
+      assert.deepEqual(await opened(), [
+        `vscode://file/${encodeURI(dir)}`,
+        `vscode://anthropic.claude-code/open?session=${UUID}`,
+      ])
+    })
+  )
+})
+
+test('asked for VS Code with no route there, present falls back to the app', async () => {
+  // A harness with no VS Code offer at all, on a Linux box where nothing answers its own scheme
+  // either: the error is the app route's, which proves the fallback was taken.
+  const empty = await fsp.mkdtemp(path.join(os.tmpdir(), 'bot-crossing-novscode-'))
+  try {
+    const shown = await withEnv({ PATH: empty }, () =>
+      withPlatform('linux', () => present({ ok: true, url: 'antigravity://resume?session=x' }, 'vscode'))
+    )
+    assert.equal(shown.ok, false)
+    assert.match(shown.error, /antigravity:\/\//)
+  } finally {
+    await fsp.rm(empty, { recursive: true, force: true })
+  }
 })

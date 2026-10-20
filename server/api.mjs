@@ -195,12 +195,57 @@ async function runInTerminal(command) {
 }
 
 /**
+ * How long VS Code gets to bring the thread's folder to the front before the extension's own
+ * link follows it. An extension link lands in whichever window is focused, so sent together the
+ * thread would open in the wrong repo's window whenever another one had focus.
+ */
+const VSCODE_HANDOFF_MS = 1500
+
+/**
+ * The links a harness's `vscode` offer turns into, in the order they are launched: the folder,
+ * which opens or fronts the window for that repo, then the extension's link if it has one.
+ * Pure, so the shape is testable without anything being opened.
+ */
+export function vscodeLinks(vscode) {
+  if (!vscode || typeof vscode !== 'object') return []
+  const links = []
+  if (typeof vscode.folder === 'string' && path.isAbsolute(vscode.folder)) {
+    links.push(`vscode://file/${encodeURI(vscode.folder.replace(/\\/g, '/'))}`)
+  }
+  if (typeof vscode.url === 'string' && schemeOf(vscode.url) === 'vscode') links.push(vscode.url)
+  return links
+}
+
+/**
+ * Hand a thread to VS Code, or say `null` when that cannot happen here and the caller should
+ * fall back to the harness's app. "If it is there" is the whole promise of the setting: a harness
+ * with no VS Code extension, or a machine with no VS Code, still opens the thread somewhere.
+ */
+async function openInVsCode(vscode) {
+  const folder = vscode && vscode.folder ? await resolveFolder(vscode.folder) : null
+  const links = vscodeLinks({ ...vscode, folder: folder || '' })
+  if (!links.length) return null
+  if (process.platform === 'linux' && !(await schemeHasHandler(links[0]))) return null
+
+  const [first, ...rest] = links
+  launch(first)
+  if (rest.length) {
+    const timer = setTimeout(() => rest.forEach(launch), folder ? VSCODE_HANDOFF_MS : 0)
+    timer.unref?.()
+  }
+  return { ok: true, via: 'vscode', note: vscode.note }
+}
+
+/**
  * Show a harness's answer to "open this" — `{ ok, url, command }` — the way the page asked for
  * it, and say truthfully whether anything happened.
  *
  * A page asking for a terminal never gets the desktop app instead, even when the CLI is missing:
  * an app window appearing after choosing a terminal reads as the setting being ignored, where an
  * error toast reads as something to fix.
+ *
+ * A page asking for VS Code is the opposite: it gets VS Code when the harness offers a `vscode`
+ * route and the machine can answer it, and the harness's usual answer below otherwise.
  *
  * Otherwise macOS and Windows hand the URL to the opener: a scheme the harness's app registers is
  * always answered there, so nothing is probed. Linux is the platform where the URL may have
@@ -222,6 +267,15 @@ export async function present(result, via = 'app') {
       }
     }
     return runInTerminal(result.command)
+  }
+
+  if (via === 'vscode') {
+    const shown = await openInVsCode(result.vscode)
+    if (shown) return shown
+    // Nothing to hand VS Code: the app, as the setting promises, and a word on why.
+    const fallback = await present(result, 'app')
+    if (!fallback.ok || fallback.note) return fallback
+    return { ...fallback, note: 'No VS Code route for that harness here — opened its app instead' }
   }
 
   // A `pid` names a live process whose thread already has a window on this machine — a session
@@ -253,7 +307,8 @@ export async function present(result, via = 'app') {
   }
 }
 
-const viaOf = (body) => (body?.via === 'terminal' ? 'terminal' : 'app')
+const VIAS = new Set(['app', 'terminal', 'vscode'])
+const viaOf = (body) => (VIAS.has(body?.via) ? body.via : 'app')
 
 /**
  * Mark the threads the colony has retired.
