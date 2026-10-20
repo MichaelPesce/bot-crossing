@@ -199,7 +199,7 @@ const DEFAULTS = {
   reducedMotion: false,
 
   // Opening
-  openIn: 'app', // 'app' | 'terminal' — the harness's desktop app, or its CLI in a new window
+  openIn: 'app', // 'app' | 'terminal' | 'vscode' — the harness's desktop app, its CLI in a new window, or its VS Code extension
 }
 
 /** Keys whose change forces a full rebuild of the world (terrain, scatter, sky). */

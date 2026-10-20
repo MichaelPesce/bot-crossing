@@ -333,7 +333,13 @@ async function openThread(ref) {
   }
   const bin = await cliBinary()
   const command = bin ? { argv: [bin, 'resume', id], cwd: typeof cwd === 'string' ? cwd : '' } : undefined
-  return { ok: true, url: `codex://threads/${id}`, command }
+  // The Codex extension registers no link for a single thread, so VS Code gets the repo and the
+  // thread is one click away in the extension's own history.
+  const result = { ok: true, url: `codex://threads/${id}`, command }
+  if (typeof cwd === 'string' && cwd) {
+    result.vscode = { folder: cwd, note: 'Opened the repo in VS Code — the thread is in the Codex panel’s history' }
+  }
+  return result
 }
 
 async function newSession(dir) {
@@ -342,6 +348,7 @@ async function newSession(dir) {
     ok: true,
     url: `codex://threads/new?${new URLSearchParams({ path: dir })}`,
     command: bin ? { argv: [bin], cwd: dir } : undefined,
+    vscode: { folder: dir },
   }
 }
 

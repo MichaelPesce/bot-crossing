@@ -32,7 +32,7 @@ all go through a `harness://` deep link handed to the OS opener — `open(1)` on
 `xdg-open` on Linux, ShellExecute on Windows. The scanning half was portable already. On Linux,
 where a desktop app often is not installed, the scheme is checked first and a terminal running
 the harness's own CLI opens instead when nothing answers it.
-A setting, *Open threads in*, makes the terminal the first choice rather than the fallback, on all three.
+A setting, *Open threads in*, makes the terminal the first choice rather than the fallback, on all three — or sends threads to the harness's VS Code extension where it has one.
 
 ## Which harnesses work
 
@@ -217,6 +217,11 @@ for good if you would rather the view stayed put.
   *Open threads in: Terminal*, in settings, asks for that every time, on any of the three. On Windows a
   thread that is already running in a terminal gets that window fronted instead of a second copy of
   itself imported into the desktop app.
+  *Open threads in: VS Code* sends the thread to the harness's VS Code extension instead, if it
+  has one: the thread's folder opens (or its window comes forward), then Claude Code's extension
+  resumes the session in a tab. Codex's extension has no link for a single thread, so it gets
+  the repo with the thread one click away in its history. A harness with no VS Code route at
+  all — Antigravity, say — falls back to its app, and the toast says so.
 - **Viewed** (`V`), on a thread that is asking for you, puts its hand down. The harness only
   counts a thread as read once it has been focused in its own app, so one you answered in a
   terminal waves for good. This records when you looked, and the thread starts asking again the

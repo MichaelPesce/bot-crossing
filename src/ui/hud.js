@@ -243,21 +243,21 @@ export class Hud {
 
     // View.
     const view = group('View')
-    // The server refuses terminals on Windows, so a choice there would only ever toast an error.
-    if (!IS_WIN) {
-      view.append(
-        this._select(
-          'Open threads in',
-          'openIn',
-          [
-            ['app', 'Desktop app'],
-            ['terminal', 'Terminal'],
-          ],
-          'Terminal runs the harness’s own CLI in a new window, so the CLI has to be installed. ' +
-            'BOT_CROSSING_TERMINAL or $TERMINAL picks the emulator.'
-        )
+    // The server refuses terminals on Windows, so that choice there would only ever toast an error.
+    view.append(
+      this._select(
+        'Open threads in',
+        'openIn',
+        [
+          ['app', 'Desktop app'],
+          ...(IS_WIN ? [] : [['terminal', 'Terminal']]),
+          ['vscode', 'VS Code'],
+        ],
+        'VS Code opens the thread in the harness’s VS Code extension where there is one, and the desktop app otherwise. ' +
+          (IS_WIN ? '' : 'Terminal runs the harness’s own CLI in a new window, so the CLI has to be installed. ') +
+          (IS_WIN ? '' : 'BOT_CROSSING_TERMINAL or $TERMINAL picks the emulator.')
       )
-    }
+    )
     view.append(
       this._toggle(
         'Hide dormant repos',
